@@ -147,6 +147,10 @@ export default function DrawingBoard({ room }: { room: string }) {
   const [cursorVisible, setCursorVisible] = useState(false);
   const [isDrawingState, setIsDrawingState] = useState(false);
 
+  // Button hover state
+  const hoveredButton = useRef<HTMLElement | null>(null);
+  const [cursorOnButton, setCursorOnButton] = useState(false);
+
   const inkColor = dark ? "#d5c4a1" : "#000000";
   const cursorColor = dark ? "#fdf6e3" : "#002b36";
   const dotColor = dark ? "#332a20" : "#d3cbb7";
@@ -603,6 +607,95 @@ export default function DrawingBoard({ room }: { room: string }) {
     return () => clearInterval(t);
   }, []);
 
+  /* ─── Button hover: cursor melts into button fill ─── */
+
+  useEffect(() => {
+    let fillDiv: HTMLDivElement | null = null;
+
+    const clearHover = (e?: MouseEvent) => {
+      if (fillDiv && hoveredButton.current) {
+        const btn = hoveredButton.current;
+        const div = fillDiv;
+
+        if (e) {
+          const rect = btn.getBoundingClientRect();
+          const exitX = e.clientX - rect.left;
+          const exitY = e.clientY - rect.top;
+          // Shrink clip-path back to exit point
+          div.style.clipPath = `circle(0px at ${exitX}px ${exitY}px)`;
+        } else {
+          div.style.opacity = "0";
+        }
+
+        setTimeout(() => { try { btn.removeChild(div); } catch {} }, 280);
+        fillDiv = null;
+        hoveredButton.current = null;
+      }
+      setCursorOnButton(false);
+    };
+
+    const onGlobalMove = (e: MouseEvent) => {
+      setLocalCursor({ x: e.clientX, y: e.clientY });
+      cursorPos.current = { x: e.clientX, y: e.clientY };
+
+      if (isDrawing.current) { clearHover(); return; }
+
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const interactive = el?.closest("button, a, [role='button']") as HTMLElement | null;
+
+      if (interactive) {
+        if (hoveredButton.current !== interactive) {
+          clearHover(e);
+
+          hoveredButton.current = interactive;
+          setCursorOnButton(true);
+
+          const rect = interactive.getBoundingClientRect();
+          const entryX = e.clientX - rect.left;
+          const entryY = e.clientY - rect.top;
+          // Max radius needed to cover entire button from entry point
+          const corners = [[0,0],[rect.width,0],[0,rect.height],[rect.width,rect.height]];
+          let maxR = 0;
+          for (const [cx, cy] of corners) {
+            maxR = Math.max(maxR, Math.sqrt((entryX-cx)**2 + (entryY-cy)**2));
+          }
+          // Add extra for button expansion (label reveal)
+          maxR += 60;
+
+          const isDark = document.documentElement.classList.contains("dark");
+          const fillColor = isDark ? "rgba(253, 246, 227, 0.12)" : "rgba(0, 43, 54, 0.18)";
+
+          fillDiv = document.createElement("div");
+          fillDiv.style.cssText = `
+            position: absolute;
+            inset: 0;
+            background: ${fillColor};
+            clip-path: circle(0px at ${entryX}px ${entryY}px);
+            pointer-events: none;
+            transition: clip-path 0.28s cubic-bezier(0.25, 0.1, 0.25, 1);
+            z-index: 0;
+          `;
+          // Store max radius for the expand
+          fillDiv.dataset.maxR = String(Math.ceil(maxR));
+          fillDiv.dataset.entryX = String(entryX);
+          fillDiv.dataset.entryY = String(entryY);
+          interactive.appendChild(fillDiv);
+
+          requestAnimationFrame(() => {
+            if (fillDiv) {
+              fillDiv.style.clipPath = `circle(${maxR}px at ${entryX}px ${entryY}px)`;
+            }
+          });
+        }
+      } else {
+        if (hoveredButton.current) clearHover(e);
+      }
+    };
+
+    window.addEventListener("mousemove", onGlobalMove);
+    return () => { window.removeEventListener("mousemove", onGlobalMove); clearHover(); };
+  }, []);
+
   /* ─── Pointer + Force Touch ─── */
 
   useEffect(() => {
@@ -662,7 +755,7 @@ export default function DrawingBoard({ room }: { room: string }) {
     const onPointerMove = (e: PointerEvent) => {
       const pt = getPoint(e);
       cursorPos.current = pt;
-      setLocalCursor({ x: pt.x, y: pt.y });
+      setLocalCursor({ x: e.clientX, y: e.clientY });
 
       if (!isDrawing.current) return;
       e.preventDefault();
@@ -776,13 +869,16 @@ export default function DrawingBoard({ room }: { room: string }) {
     <div className="relative h-full w-full dot-grid">
       <div className="top-bar">
         <div className="flex items-center gap-3">
-          <span className="logo">Pictionary</span>
-          <button onClick={handleCopyLink} className="badge">
+          <span className="logo-wrap">
+            <span className="logo">Pictionary</span>
+            <span className="logo-sub" suppressHydrationWarning>made with <span style={{fontSize: '13px'}}>♥</span> for Hugh</span>
+          </span>
+          <button onClick={handleCopyLink} className="badge" suppressHydrationWarning>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
             </svg>
-            {copied ? "Copied!" : "Copy Link"}
+            <span className={`badge-label ${copied ? "visible" : ""}`}>{copied ? "Copied!" : "Copy Link"}</span>
           </button>
           {connected && (
             <span className="live-dot" />
@@ -825,25 +921,23 @@ export default function DrawingBoard({ room }: { room: string }) {
         </div>
       ))}
 
-      {/* Virtual local cursor — filled circle, grows when drawing */}
-      {cursorVisible && localCursor && (() => {
-        const size = isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE;
-        return (
-          <div
-            className="absolute pointer-events-none"
-            style={{
-              left: localCursor.x - size / 2,
-              top: localCursor.y - size / 2,
-              width: size,
-              height: size,
-              borderRadius: "50%",
-              backgroundColor: cursorColor,
-              zIndex: 25,
-              transition: "width 0.15s ease, height 0.15s ease",
-            }}
-          />
-        );
-      })()}
+      {/* Virtual cursor — fades out when hovering buttons */}
+      {localCursor && (
+        <div
+          className="fixed pointer-events-none"
+          style={{
+            left: localCursor.x - (isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE) / 2,
+            top: localCursor.y - (isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE) / 2,
+            width: isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE,
+            height: isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE,
+            borderRadius: "50%",
+            backgroundColor: cursorColor,
+            opacity: cursorOnButton ? 0 : 1,
+            zIndex: 9999,
+            transition: "width 0.15s ease, height 0.15s ease, opacity 0.12s ease",
+          }}
+        />
+      )}
 
       <canvas ref={dotsRef} className="absolute inset-0 touch-none" style={{ zIndex: 0, cursor: "none" }} />
       <canvas ref={canvasRef} className="absolute inset-0 touch-none" style={{ zIndex: 1, cursor: "none" }} data-ink={inkColor} />

@@ -49,6 +49,11 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
+  cursor: none;
+}
+
+* {
+  cursor: none !important;
 }
 
 .dot-grid {
@@ -72,6 +77,26 @@ body {
 
 .top-bar > * {
   pointer-events: auto;
+  cursor: none;
+}
+
+.top-bar button,
+.top-bar a {
+  cursor: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.top-bar button > *,
+.top-bar a > * {
+  position: relative;
+  z-index: 1;
+}
+
+.logo-wrap {
+  position: relative;
+  display: inline-block;
+  cursor: none;
 }
 
 .logo {
@@ -81,10 +106,29 @@ body {
   color: var(--fg);
 }
 
+.logo-sub {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+
+.logo-wrap:hover .logo-sub {
+  opacity: 1;
+  transform: translateY(2px);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 0;
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 11px;
@@ -100,6 +144,25 @@ body {
 
 .badge:hover {
   color: var(--fg);
+  background: none;
+}
+
+.badge-label {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  vertical-align: middle;
+  transition: max-width 0.3s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.2s ease, margin 0.3s ease;
+  margin-left: 0;
+}
+
+.badge:hover .badge-label,
+.badge-label.visible {
+  max-width: 80px;
+  opacity: 1;
+  margin-left: 5px;
 }
 
 .live-dot {
