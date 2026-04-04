@@ -157,6 +157,29 @@ export default function DrawingBoard({ room }: { room: string }) {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
+
+    // Recolor all strokes on the canvas to match the new theme
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+    const newInk = dark ? [213, 196, 161] : [0, 0, 0]; // #d5c4a1 or #000000
+
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] > 0) {
+        // Non-transparent pixel: replace color, preserve alpha
+        data[i] = newInk[0];
+        data[i + 1] = newInk[1];
+        data[i + 2] = newInk[2];
+      }
+    }
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.putImageData(imgData, 0, 0);
+    ctx.restore();
   }, [dark]);
 
   /* ─── Render remote ops (with stroke continuity) ─── */
