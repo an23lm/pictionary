@@ -257,7 +257,10 @@ export default function DrawingBoard({ room }: { room: string }) {
     const widths = activeWidths.current;
     if (pts.length < 4) return;
 
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.restore();
     ctx.strokeStyle = main.dataset.ink || "#000000";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -317,15 +320,30 @@ export default function DrawingBoard({ room }: { room: string }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.globalAlpha = opacity;
+    // Draw in raw pixel space to avoid double-scaling
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(overlay, 0, 0);
+    ctx.restore();
     ctx.globalAlpha = 1;
-    overlay.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height);
+    const oCtx = overlay.getContext("2d");
+    if (oCtx) {
+      oCtx.save();
+      oCtx.setTransform(1, 0, 0, 1, 0, 0);
+      oCtx.clearRect(0, 0, overlay.width, overlay.height);
+      oCtx.restore();
+    }
   }, []);
 
   const clearCanvas = useCallback(() => {
-    canvasRef.current?.getContext("2d")?.clearRect(
-      0, 0, canvasRef.current.width, canvasRef.current.height
-    );
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.restore();
   }, []);
 
   /* ─── Network ─── */
@@ -438,16 +456,42 @@ export default function DrawingBoard({ room }: { room: string }) {
     const overlay = overlayRef.current;
     const dots = dotsRef.current;
     if (!canvas || !overlay || !dots) return;
+
+    const applyDpr = (c: HTMLCanvasElement) => {
+      const dpr = window.devicePixelRatio || 1;
+      c.width = window.innerWidth * dpr;
+      c.height = window.innerHeight * dpr;
+      c.style.width = window.innerWidth + "px";
+      c.style.height = window.innerHeight + "px";
+      const ctx = c.getContext("2d");
+      ctx?.scale(dpr, dpr);
+    };
+
     const resize = () => {
-      const ctx = canvas.getContext("2d");
-      const img = ctx?.getImageData(0, 0, canvas.width, canvas.height);
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-      overlay.width = window.innerWidth;
-      overlay.height = window.innerHeight;
-      dots.width = window.innerWidth;
-      dots.height = window.innerHeight;
-      if (img) ctx?.putImageData(img, 0, 0);
+      // Save current drawing as a bitmap
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+      tempCanvas.getContext("2d")?.drawImage(canvas, 0, 0);
+
+      const oldW = canvas.width;
+      const oldH = canvas.height;
+      const dpr = window.devicePixelRatio || 1;
+
+      applyDpr(canvas);
+      applyDpr(overlay);
+      applyDpr(dots);
+
+      // Restore: draw the old content scaled to match CSS dimensions
+      if (oldW > 0 && oldH > 0) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to raw pixels
+          ctx.drawImage(tempCanvas, 0, 0, oldW, oldH, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+        }
+      }
       recalcSafeZone();
       broadcastDims();
     };

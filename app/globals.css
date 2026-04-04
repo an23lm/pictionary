@@ -155,4 +155,5 @@ body {
   position: absolute;
   pointer-events: none;
   z-index: 15;
+  transition: left 0.15s cubic-bezier(0.25, 0.1, 0.25, 1), top 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
