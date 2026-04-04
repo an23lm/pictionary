@@ -14,8 +14,7 @@ type Stroke = {
   pts: number[];
   c?: string;
   w?: number;
-  o?: number;
-  sid?: string; // stroke ID for continuity across batches
+  sid?: string;
 };
 
 type Dot = {
@@ -24,7 +23,6 @@ type Dot = {
   dot: true;
   c?: string;
   w?: number;
-  o?: number;
 };
 
 type DrawOp = Stroke | Dot;
@@ -56,7 +54,6 @@ const LINE_WIDTH_MAX = 4.5;   // thickest (slow/still)
 const WIDTH_LERP = 0.15;      // smoothing factor (0–1, lower = smoother transitions)
 const CURSOR_SIZE = LINE_WIDTH * 2;
 const SEND_INTERVAL = 33; // ~30fps
-const MIN_OPACITY = 0.3;
 const CURSOR_EXPIRE_MS = 5000;
 const CURSOR_MOVE_THRESHOLD = 1;
 
@@ -72,15 +69,6 @@ const DOT_SCALE_MAX = 2.5;    // max radius multiplier at cursor center
 
 function isDot(op: DrawOp): op is Dot {
   return "dot" in op;
-}
-
-function pressureToOpacity(p: number): number {
-  return MIN_OPACITY + (1 - MIN_OPACITY) * p * p;
-}
-
-function forceToOpacity(f: number): number {
-  const t = Math.max(0, Math.min(1, (f - 0.3) / 2.7));
-  return MIN_OPACITY + (1 - MIN_OPACITY) * t * t;
 }
 
 /* ─── Smooth curve rendering ─── */
@@ -117,20 +105,14 @@ export default function DrawingBoard({ room }: { room: string }) {
   const strokeId = useRef("");
   const activePoints = useRef<number[]>([]);
   const activeWidths = useRef<number[]>([]); // per-point width for variable thickness
-  const activeOpacity = useRef(1);
   const batch = useRef<DrawOp[]>([]);
   const pendingPoints = useRef<number[]>([]);
-  const pendingOpacity = useRef(1);
   const socketIdRef = useRef("");
 
   // Velocity-based width
   const lastMoveTime = useRef(0);
   const lastMovePos = useRef<Point>({ x: 0, y: 0 });
   const smoothedWidth = useRef(LINE_WIDTH);
-
-  // Force Touch
-  const currentForce = useRef(0);
-  const hasForceTouch = useRef(false);
 
   // Cursor
   const cursorPos = useRef<Point>({ x: 0, y: 0 });
@@ -142,6 +124,7 @@ export default function DrawingBoard({ room }: { room: string }) {
   const safeZone = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const [copied, setCopied] = useState(false);
+  const [copiedVisible, setCopiedVisible] = useState(false);
   const [connected, setConnected] = useState(false);
   const [dark, setDark] = useState(false);
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
@@ -191,8 +174,7 @@ export default function DrawingBoard({ room }: { room: string }) {
     const oy = sz ? sz.y : 0;
 
     for (const op of ops) {
-      const o = op.o ?? 1;
-      ctx.globalAlpha = o;
+      ctx.globalAlpha = 1;
 
       if (isDot(op)) {
         ctx.fillStyle = op.c ?? "#000000";
@@ -313,19 +295,16 @@ export default function DrawingBoard({ room }: { room: string }) {
     }
   }, []);
 
-  const commitOverlay = useCallback((opacity: number) => {
+  const commitOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
     if (!canvas || !overlay) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.globalAlpha = opacity;
-    // Draw in raw pixel space to avoid double-scaling
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(overlay, 0, 0);
     ctx.restore();
-    ctx.globalAlpha = 1;
     const oCtx = overlay.getContext("2d");
     if (oCtx) {
       oCtx.save();
@@ -334,6 +313,18 @@ export default function DrawingBoard({ room }: { room: string }) {
       oCtx.restore();
     }
   }, []);
+
+  const saveToStorage = useCallback(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    const tmp = document.createElement("canvas");
+    tmp.width = c.width / dpr;
+    tmp.height = c.height / dpr;
+    const tCtx = tmp.getContext("2d");
+    if (tCtx) tCtx.drawImage(c, 0, 0, c.width, c.height, 0, 0, tmp.width, tmp.height);
+    try { localStorage.setItem(`pictionary-${room}`, tmp.toDataURL("image/png")); } catch {}
+  }, [room]);
 
   const clearCanvas = useCallback(() => {
     const c = canvasRef.current;
@@ -344,7 +335,8 @@ export default function DrawingBoard({ room }: { room: string }) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
     ctx.restore();
-  }, []);
+    try { localStorage.removeItem(`pictionary-${room}`); } catch {}
+  }, [room]);
 
   /* ─── Network ─── */
 
@@ -395,7 +387,6 @@ export default function DrawingBoard({ room }: { room: string }) {
   const drainPending = useCallback((keepLast: boolean) => {
     if (pendingPoints.current.length < 4) return;
     const color = canvasRef.current?.dataset.ink || "#000000";
-    const o = Math.round(pendingOpacity.current * 100) / 100;
     const w = Math.round(smoothedWidth.current * 10) / 10;
     const pts = [...pendingPoints.current];
     const sz = safeZone.current;
@@ -405,7 +396,7 @@ export default function DrawingBoard({ room }: { room: string }) {
         pts[i + 1] -= sz.y;
       }
     }
-    batch.current.push({ pts, c: color, w, sid: strokeId.current, ...(o < 1 ? { o } : {}) });
+    batch.current.push({ pts, c: color, w, sid: strokeId.current });
     pendingPoints.current = keepLast ? pendingPoints.current.slice(-2) : [];
   }, []);
 
@@ -496,9 +487,23 @@ export default function DrawingBoard({ room }: { room: string }) {
       broadcastDims();
     };
     resize();
+
+    // Restore from localStorage
+    try {
+      const saved = localStorage.getItem(`pictionary-${room}`);
+      if (saved) {
+        const img = new Image();
+        img.onload = () => {
+          const ctx = canvas.getContext("2d");
+          if (ctx) ctx.drawImage(img, 0, 0, img.width, img.height);
+        };
+        img.src = saved;
+      }
+    } catch {}
+
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [recalcSafeZone, broadcastDims]);
+  }, [recalcSafeZone, broadcastDims, room]);
 
   /* ─── Animated dot grid ─── */
 
@@ -626,7 +631,10 @@ export default function DrawingBoard({ room }: { room: string }) {
       renderOps(data.ops);
       setRemoteDrawing(true);
       if (remoteDrawTimer.current) clearTimeout(remoteDrawTimer.current);
-      remoteDrawTimer.current = setTimeout(() => setRemoteDrawing(false), 200);
+      remoteDrawTimer.current = setTimeout(() => {
+        setRemoteDrawing(false);
+        saveToStorage();
+      }, 200);
     });
     channel.bind("clear", () => clearCanvas());
     channel.bind("cursor", (data: CursorEvent) => {
@@ -646,12 +654,82 @@ export default function DrawingBoard({ room }: { room: string }) {
         remoteDims.current.w !== data.w || remoteDims.current.h !== data.h;
       remoteDims.current = data;
       recalcSafeZone();
-      // Reply with our dims so the other client also gets the safe zone
-      // Only reply if their dims actually changed (prevents ping-pong)
       if (changed) broadcastDims();
     });
-    return () => { pusher.unsubscribe(`room-${room}`); pusher.disconnect(); };
-  }, [room, renderOps, clearCanvas, broadcastDims, recalcSafeZone]);
+
+    // ── Canvas sync for late joiners ──
+    // When a new client requests sync, send our canvas state
+    channel.bind("sync-req", () => {
+      const c = canvasRef.current;
+      if (!c) return;
+      const dpr = window.devicePixelRatio || 1;
+      // Export at CSS resolution for consistency
+      const tmp = document.createElement("canvas");
+      tmp.width = c.width / dpr;
+      tmp.height = c.height / dpr;
+      const tCtx = tmp.getContext("2d");
+      if (tCtx) {
+        tCtx.drawImage(c, 0, 0, c.width, c.height, 0, 0, tmp.width, tmp.height);
+      }
+      const dataUrl = tmp.toDataURL("image/png");
+      // Chunk into 8KB pieces (Pusher 10KB limit with overhead)
+      const CHUNK = 8000;
+      const total = Math.ceil(dataUrl.length / CHUNK);
+      for (let i = 0; i < total; i++) {
+        immediateQueue.current.push({
+          event: "sync-data",
+          data: {
+            i, total,
+            d: dataUrl.slice(i * CHUNK, (i + 1) * CHUNK),
+            w: tmp.width, h: tmp.height,
+          },
+        });
+      }
+      sendBatch();
+    });
+
+    // Receive canvas sync chunks
+    const syncChunks = new Map<number, string>();
+    let syncTotal = 0;
+    let syncW = 0, syncH = 0;
+
+    channel.bind("sync-data", (data: { i: number; total: number; d: string; w: number; h: number }) => {
+      syncTotal = data.total;
+      syncW = data.w;
+      syncH = data.h;
+      syncChunks.set(data.i, data.d);
+
+      if (syncChunks.size === syncTotal) {
+        // Assemble and draw
+        let full = "";
+        for (let i = 0; i < syncTotal; i++) full += syncChunks.get(i) ?? "";
+        syncChunks.clear();
+
+        const img = new Image();
+        img.onload = () => {
+          const c = canvasRef.current;
+          if (!c) return;
+          const ctx = c.getContext("2d");
+          if (!ctx) return;
+          ctx.drawImage(img, 0, 0, syncW, syncH);
+          saveToStorage();
+        };
+        img.src = full;
+      }
+    });
+
+    // Request sync after a short delay (let existing clients settle)
+    const syncTimer = setTimeout(() => {
+      immediateQueue.current.push({ event: "sync-req", data: {} });
+      sendBatch();
+    }, 500);
+
+    return () => {
+      clearTimeout(syncTimer);
+      pusher.unsubscribe(`room-${room}`);
+      pusher.disconnect();
+    };
+  }, [room, renderOps, clearCanvas, broadcastDims, recalcSafeZone, sendBatch]);
 
   /* ─── Send loop ─── */
 
@@ -762,7 +840,7 @@ export default function DrawingBoard({ room }: { room: string }) {
     return () => { window.removeEventListener("mousemove", onGlobalMove); clearHover(); };
   }, []);
 
-  /* ─── Pointer + Force Touch ─── */
+  /* ─── Pointer events ─── */
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -772,28 +850,6 @@ export default function DrawingBoard({ room }: { room: string }) {
     const getPoint = (e: { clientX: number; clientY: number }): Point => {
       const rect = canvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    };
-
-    const getOpacity = (e: PointerEvent): number => {
-      if (hasForceTouch.current && currentForce.current > 0) {
-        return forceToOpacity(currentForce.current);
-      }
-      if (e.pressure > 0 && e.pressure !== 0.5) {
-        return pressureToOpacity(e.pressure);
-      }
-      return 1;
-    };
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const onForceChange = (e: any) => {
-      hasForceTouch.current = true;
-      currentForce.current = e.webkitForce ?? 0;
-      if (isDrawing.current) {
-        const o = forceToOpacity(currentForce.current);
-        activeOpacity.current = o;
-        pendingOpacity.current = o;
-        overlay.style.opacity = String(o);
-      }
     };
 
     const onPointerDown = (e: PointerEvent) => {
@@ -814,9 +870,6 @@ export default function DrawingBoard({ room }: { room: string }) {
       activePoints.current.push(pt.x, pt.y);
       activeWidths.current.push(LINE_WIDTH);
       pendingPoints.current.push(pt.x, pt.y);
-      activeOpacity.current = getOpacity(e);
-      pendingOpacity.current = activeOpacity.current;
-      overlay.style.opacity = String(activeOpacity.current);
     };
 
     const onPointerMove = (e: PointerEvent) => {
@@ -828,15 +881,13 @@ export default function DrawingBoard({ room }: { room: string }) {
       e.preventDefault();
       hasMoved.current = true;
 
-      // Compute velocity → target width (fast = thin, slow = thick)
       const now = performance.now();
-      const dt = Math.max(1, now - lastMoveTime.current); // ms
+      const dt = Math.max(1, now - lastMoveTime.current);
       const dx = pt.x - lastMovePos.current.x;
       const dy = pt.y - lastMovePos.current.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      const speed = dist / dt; // px/ms
+      const speed = dist / dt;
 
-      // Map speed to width: speed ~0 → MAX, speed ~2+ px/ms → MIN
       const speedNorm = Math.min(1, speed / 2);
       const targetWidth = LINE_WIDTH_MAX - (LINE_WIDTH_MAX - LINE_WIDTH_MIN) * speedNorm;
       smoothedWidth.current += (targetWidth - smoothedWidth.current) * WIDTH_LERP;
@@ -844,13 +895,9 @@ export default function DrawingBoard({ room }: { room: string }) {
       lastMoveTime.current = now;
       lastMovePos.current = { x: pt.x, y: pt.y };
 
-      const opacity = getOpacity(e);
       activePoints.current.push(pt.x, pt.y);
       activeWidths.current.push(smoothedWidth.current);
       pendingPoints.current.push(pt.x, pt.y);
-      activeOpacity.current = opacity;
-      pendingOpacity.current = opacity;
-      overlay.style.opacity = String(opacity);
       redrawOverlay();
     };
 
@@ -858,37 +905,33 @@ export default function DrawingBoard({ room }: { room: string }) {
       if (!isDrawing.current) return;
 
       if (!hasMoved.current && activePoints.current.length >= 2) {
-        // Dot
         const x = activePoints.current[0], y = activePoints.current[1];
         const color = canvas.dataset.ink || "#000000";
-        const o = Math.round(activeOpacity.current * 100) / 100;
         const ctx = canvas.getContext("2d");
         if (ctx) {
-          ctx.globalAlpha = o;
           ctx.fillStyle = color;
           ctx.beginPath();
           ctx.arc(x, y, LINE_WIDTH / 2, 0, Math.PI * 2);
           ctx.fill();
-          ctx.globalAlpha = 1;
         }
         const sz = safeZone.current;
         const sx = sz ? x - sz.x : x;
         const sy = sz ? y - sz.y : y;
-        batch.current.push({ x: sx, y: sy, dot: true, c: color, w: LINE_WIDTH, ...(o < 1 ? { o } : {}) } as Dot);
-        overlay.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height);
+        batch.current.push({ x: sx, y: sy, dot: true, c: color, w: LINE_WIDTH } as Dot);
+        const oCtx = overlay.getContext("2d");
+        if (oCtx) { oCtx.save(); oCtx.setTransform(1,0,0,1,0,0); oCtx.clearRect(0,0,overlay.width,overlay.height); oCtx.restore(); }
       } else {
-        commitOverlay(activeOpacity.current);
+        commitOverlay();
       }
 
       flushPending();
       activePoints.current.length = 0;
       activeWidths.current = [];
       pendingPoints.current = [];
-      overlay.style.opacity = "1";
       isDrawing.current = false;
       setIsDrawingState(false);
       hasMoved.current = false;
-      currentForce.current = 0;
+      requestAnimationFrame(() => saveToStorage());
     };
 
     const onPointerEnter = () => setCursorVisible(true);
@@ -903,8 +946,6 @@ export default function DrawingBoard({ room }: { room: string }) {
     overlay.addEventListener("pointerenter", onPointerEnter);
     overlay.addEventListener("pointerleave", onPointerLeave);
     overlay.addEventListener("pointercancel", onPointerUp);
-    canvas.addEventListener("webkitmouseforcechanged", onForceChange);
-    overlay.addEventListener("webkitmouseforcechanged", onForceChange);
 
     return () => {
       overlay.removeEventListener("pointerdown", onPointerDown);
@@ -913,10 +954,8 @@ export default function DrawingBoard({ room }: { room: string }) {
       overlay.removeEventListener("pointerenter", onPointerEnter);
       overlay.removeEventListener("pointerleave", onPointerLeave);
       overlay.removeEventListener("pointercancel", onPointerUp);
-      canvas.removeEventListener("webkitmouseforcechanged", onForceChange);
-      overlay.removeEventListener("webkitmouseforcechanged", onForceChange);
     };
-  }, [flushPending, redrawOverlay, commitOverlay]);
+  }, [flushPending, redrawOverlay, commitOverlay, saveToStorage]);
 
   /* ─── Handlers ─── */
 
@@ -928,7 +967,11 @@ export default function DrawingBoard({ room }: { room: string }) {
   const handleCopyLink = () => {
     navigator.clipboard.writeText(window.location.href).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopiedVisible(true);
+      setTimeout(() => {
+        setCopiedVisible(false); // starts collapse animation
+        setTimeout(() => setCopied(false), 300); // change text after animation
+      }, 2000);
     });
   };
 
@@ -945,7 +988,7 @@ export default function DrawingBoard({ room }: { room: string }) {
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
             </svg>
-            <span className={`badge-label ${copied ? "visible" : ""}`}>{copied ? "Copied!" : "Copy Link"}</span>
+            <span className={`badge-label ${copiedVisible ? "visible" : ""}`}>{copied ? "Copied!" : "Copy Link"}</span>
           </button>
           {connected && (
             <span className="live-dot" />

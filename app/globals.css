@@ -142,7 +142,8 @@ body {
 
 .badge:hover .badge-label,
 .badge-label.visible {
-    max-width: 80px;
+    max-width: 65px;
+    width: 55px;
     opacity: 1;
     margin-left: 5px;
 }
