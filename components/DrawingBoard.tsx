@@ -317,13 +317,7 @@ export default function DrawingBoard({ room }: { room: string }) {
   const saveToStorage = useCallback(() => {
     const c = canvasRef.current;
     if (!c) return;
-    const dpr = window.devicePixelRatio || 1;
-    const tmp = document.createElement("canvas");
-    tmp.width = c.width / dpr;
-    tmp.height = c.height / dpr;
-    const tCtx = tmp.getContext("2d");
-    if (tCtx) tCtx.drawImage(c, 0, 0, c.width, c.height, 0, 0, tmp.width, tmp.height);
-    try { localStorage.setItem(`pictionary-${room}`, tmp.toDataURL("image/png")); } catch {}
+    try { localStorage.setItem(`pictionary-${room}`, c.toDataURL("image/png")); } catch {}
   }, [room]);
 
   const clearCanvas = useCallback(() => {
@@ -478,8 +472,10 @@ export default function DrawingBoard({ room }: { room: string }) {
         const ctx = canvas.getContext("2d");
         if (ctx) {
           ctx.save();
-          ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform to raw pixels
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.imageSmoothingEnabled = false;
           ctx.drawImage(tempCanvas, 0, 0, oldW, oldH, 0, 0, canvas.width, canvas.height);
+          ctx.imageSmoothingEnabled = true;
           ctx.restore();
         }
       }
@@ -488,14 +484,22 @@ export default function DrawingBoard({ room }: { room: string }) {
     };
     resize();
 
-    // Restore from localStorage
+    // Restore from localStorage at full DPR resolution
     try {
       const saved = localStorage.getItem(`pictionary-${room}`);
       if (saved) {
         const img = new Image();
         img.onload = () => {
           const ctx = canvas.getContext("2d");
-          if (ctx) ctx.drawImage(img, 0, 0, img.width, img.height);
+          if (ctx) {
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.imageSmoothingEnabled = false;
+            // Draw at exact pixel dimensions, scaling if needed (e.g. window resized)
+            ctx.drawImage(img, 0, 0, img.naturalWidth, img.naturalHeight, 0, 0, canvas.width, canvas.height);
+            ctx.imageSmoothingEnabled = true;
+            ctx.restore();
+          }
         };
         img.src = saved;
       }
@@ -631,10 +635,7 @@ export default function DrawingBoard({ room }: { room: string }) {
       renderOps(data.ops);
       setRemoteDrawing(true);
       if (remoteDrawTimer.current) clearTimeout(remoteDrawTimer.current);
-      remoteDrawTimer.current = setTimeout(() => {
-        setRemoteDrawing(false);
-        saveToStorage();
-      }, 200);
+      remoteDrawTimer.current = setTimeout(() => setRemoteDrawing(false), 200);
     });
     channel.bind("clear", () => clearCanvas());
     channel.bind("cursor", (data: CursorEvent) => {
@@ -662,17 +663,8 @@ export default function DrawingBoard({ room }: { room: string }) {
     channel.bind("sync-req", () => {
       const c = canvasRef.current;
       if (!c) return;
-      const dpr = window.devicePixelRatio || 1;
-      // Export at CSS resolution for consistency
-      const tmp = document.createElement("canvas");
-      tmp.width = c.width / dpr;
-      tmp.height = c.height / dpr;
-      const tCtx = tmp.getContext("2d");
-      if (tCtx) {
-        tCtx.drawImage(c, 0, 0, c.width, c.height, 0, 0, tmp.width, tmp.height);
-      }
-      const dataUrl = tmp.toDataURL("image/png");
-      // Chunk into 8KB pieces (Pusher 10KB limit with overhead)
+      // Export at full DPR resolution
+      const dataUrl = c.toDataURL("image/png");
       const CHUNK = 8000;
       const total = Math.ceil(dataUrl.length / CHUNK);
       for (let i = 0; i < total; i++) {
@@ -681,7 +673,7 @@ export default function DrawingBoard({ room }: { room: string }) {
           data: {
             i, total,
             d: dataUrl.slice(i * CHUNK, (i + 1) * CHUNK),
-            w: tmp.width, h: tmp.height,
+            w: c.width, h: c.height,
           },
         });
       }
@@ -711,8 +703,12 @@ export default function DrawingBoard({ room }: { room: string }) {
           if (!c) return;
           const ctx = c.getContext("2d");
           if (!ctx) return;
-          ctx.drawImage(img, 0, 0, syncW, syncH);
-          saveToStorage();
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(img, 0, 0, syncW, syncH, 0, 0, c.width, c.height);
+          ctx.imageSmoothingEnabled = true;
+          ctx.restore();
         };
         img.src = full;
       }
@@ -740,6 +736,14 @@ export default function DrawingBoard({ room }: { room: string }) {
     }, SEND_INTERVAL);
     return () => { clearInterval(timer); sendBatch(); };
   }, [sendBatch, drainPending]);
+
+  /* ─── Save to localStorage on page unload only ─── */
+
+  useEffect(() => {
+    const onUnload = () => saveToStorage();
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [saveToStorage]);
 
   /* ─── Expire cursors ─── */
 
@@ -931,7 +935,6 @@ export default function DrawingBoard({ room }: { room: string }) {
       isDrawing.current = false;
       setIsDrawingState(false);
       hasMoved.current = false;
-      requestAnimationFrame(() => saveToStorage());
     };
 
     const onPointerEnter = () => setCursorVisible(true);
