@@ -59,6 +59,16 @@ const MIN_OPACITY = 0.3;
 const CURSOR_EXPIRE_MS = 5000;
 const CURSOR_MOVE_THRESHOLD = 3;
 
+// Dot grid animation
+const DOT_SPACING = 28;
+const DOT_RADIUS = 1.8;
+const DOT_REPEL_RADIUS = 120; // px — how far the cursor affects dots
+const DOT_REPEL_STRENGTH = 6; // px — max displacement at cursor center
+const DOT_ATTRACT_STRENGTH = 4; // px — max attraction when drawing
+const CURSOR_SIZE_DRAWING = LINE_WIDTH * 4; // larger cursor while drawing
+const DOT_RETURN_SPEED = 0.08; // spring return (0–1, lower = more viscous)
+const DOT_SCALE_MAX = 2.5;    // max radius multiplier at cursor center
+
 function isDot(op: DrawOp): op is Dot {
   return "dot" in op;
 }
@@ -100,6 +110,7 @@ function drawSmoothPath(ctx: CanvasRenderingContext2D, pts: number[]) {
 export default function DrawingBoard({ room }: { room: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const dotsRef = useRef<HTMLCanvasElement>(null);
   const isDrawing = useRef(false);
   const hasMoved = useRef(false);
   const activePoints = useRef<number[]>([]);
@@ -130,9 +141,11 @@ export default function DrawingBoard({ room }: { room: string }) {
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
   const [localCursor, setLocalCursor] = useState<Point | null>(null);
   const [cursorVisible, setCursorVisible] = useState(false);
+  const [isDrawingState, setIsDrawingState] = useState(false);
 
   const inkColor = dark ? "#d5c4a1" : "#000000";
   const cursorColor = dark ? "#fdf6e3" : "#002b36";
+  const dotColor = dark ? "#332a20" : "#d3cbb7";
 
   /* ─── Dark mode ─── */
 
@@ -329,7 +342,8 @@ export default function DrawingBoard({ room }: { room: string }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const overlay = overlayRef.current;
-    if (!canvas || !overlay) return;
+    const dots = dotsRef.current;
+    if (!canvas || !overlay || !dots) return;
     const resize = () => {
       const ctx = canvas.getContext("2d");
       const img = ctx?.getImageData(0, 0, canvas.width, canvas.height);
@@ -337,11 +351,112 @@ export default function DrawingBoard({ room }: { room: string }) {
       canvas.height = window.innerHeight;
       overlay.width = window.innerWidth;
       overlay.height = window.innerHeight;
+      dots.width = window.innerWidth;
+      dots.height = window.innerHeight;
       if (img) ctx?.putImageData(img, 0, 0);
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
+  }, []);
+
+  /* ─── Animated dot grid ─── */
+
+  useEffect(() => {
+    const dotsCanvas = dotsRef.current;
+    if (!dotsCanvas) return;
+
+    // Dot state: displaced positions spring back toward grid rest positions
+    let dotOffsets: Float32Array | null = null; // [dx, dy, dx, dy, ...] per dot
+    let cols = 0;
+    let rows = 0;
+    let animId = 0;
+
+    const initDots = () => {
+      cols = Math.ceil(dotsCanvas.width / DOT_SPACING) + 1;
+      rows = Math.ceil(dotsCanvas.height / DOT_SPACING) + 1;
+      dotOffsets = new Float32Array(cols * rows * 2); // all zeros = at rest
+    };
+
+    initDots();
+
+    const animate = () => {
+      const ctx = dotsCanvas.getContext("2d");
+      if (!ctx || !dotOffsets) { animId = requestAnimationFrame(animate); return; }
+
+      const w = dotsCanvas.width;
+      const h = dotsCanvas.height;
+      if (w === 0 || h === 0) { animId = requestAnimationFrame(animate); return; }
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Recalc grid size if canvas resized
+      const newCols = Math.ceil(w / DOT_SPACING) + 1;
+      const newRows = Math.ceil(h / DOT_SPACING) + 1;
+      if (newCols !== cols || newRows !== rows) {
+        cols = newCols;
+        rows = newRows;
+        dotOffsets = new Float32Array(cols * rows * 2);
+      }
+
+      const cx = cursorPos.current.x;
+      const cy = cursorPos.current.y;
+      const r2 = DOT_REPEL_RADIUS * DOT_REPEL_RADIUS;
+      const halfSpacing = DOT_SPACING / 2;
+
+      // Read dot color from CSS variable
+      const color = getComputedStyle(document.documentElement)
+        .getPropertyValue("--dot-color").trim() || "#d3cbb7";
+
+      ctx.fillStyle = color;
+
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const idx = (row * cols + col) * 2;
+          const restX = col * DOT_SPACING + halfSpacing;
+          const restY = row * DOT_SPACING + halfSpacing;
+
+          // Compute repulsion from cursor
+          const dx = restX - cx;
+          const dy = restY - cy;
+          const dist2 = dx * dx + dy * dy;
+
+          let proximity = 0; // 0 = far, 1 = at cursor center
+          const drawing = isDrawing.current;
+
+          if (dist2 < r2 && dist2 > 0.1) {
+            const dist = Math.sqrt(dist2);
+            proximity = 1 - dist / DOT_REPEL_RADIUS;
+            const strength = drawing ? DOT_ATTRACT_STRENGTH : DOT_REPEL_STRENGTH;
+            const force = proximity * strength;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            // Repel (positive) when idle, attract (negative) when drawing
+            const dir = drawing ? -1 : 1;
+            dotOffsets[idx] += (nx * force * dir - dotOffsets[idx]) * 0.15;
+            dotOffsets[idx + 1] += (ny * force * dir - dotOffsets[idx + 1]) * 0.15;
+          } else {
+            dotOffsets[idx] *= (1 - DOT_RETURN_SPEED);
+            dotOffsets[idx + 1] *= (1 - DOT_RETURN_SPEED);
+          }
+
+          const drawX = restX + dotOffsets[idx];
+          const drawY = restY + dotOffsets[idx + 1];
+
+          // Scale up dots near cursor: gradient from 1× to DOT_SCALE_MAX×
+          const scale = 1 + (DOT_SCALE_MAX - 1) * proximity * proximity;
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, DOT_RADIUS * scale, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      animId = requestAnimationFrame(animate);
+    };
+
+    animId = requestAnimationFrame(animate);
+
+    return () => cancelAnimationFrame(animId);
   }, []);
 
   /* ─── Pusher ─── */
@@ -438,6 +553,7 @@ export default function DrawingBoard({ room }: { room: string }) {
       e.preventDefault();
       try { overlay.setPointerCapture(e.pointerId); } catch {}
       isDrawing.current = true;
+      setIsDrawingState(true);
       hasMoved.current = false;
       smoothedWidth.current = LINE_WIDTH;
       lastMoveTime.current = performance.now();
@@ -519,6 +635,7 @@ export default function DrawingBoard({ room }: { room: string }) {
       pendingPoints.current = [];
       overlay.style.opacity = "1";
       isDrawing.current = false;
+      setIsDrawingState(false);
       hasMoved.current = false;
       currentForce.current = 0;
     };
@@ -617,22 +734,27 @@ export default function DrawingBoard({ room }: { room: string }) {
         </div>
       ))}
 
-      {/* Virtual local cursor — filled circle, 2× line width */}
-      {cursorVisible && localCursor && (
-        <div
-          className="absolute pointer-events-none"
-          style={{
-            left: localCursor.x - CURSOR_SIZE / 2,
-            top: localCursor.y - CURSOR_SIZE / 2,
-            width: CURSOR_SIZE,
-            height: CURSOR_SIZE,
-            borderRadius: "50%",
-            backgroundColor: cursorColor,
-            zIndex: 25,
-          }}
-        />
-      )}
+      {/* Virtual local cursor — filled circle, grows when drawing */}
+      {cursorVisible && localCursor && (() => {
+        const size = isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE;
+        return (
+          <div
+            className="absolute pointer-events-none"
+            style={{
+              left: localCursor.x - size / 2,
+              top: localCursor.y - size / 2,
+              width: size,
+              height: size,
+              borderRadius: "50%",
+              backgroundColor: cursorColor,
+              zIndex: 25,
+              transition: "width 0.15s ease, height 0.15s ease",
+            }}
+          />
+        );
+      })()}
 
+      <canvas ref={dotsRef} className="absolute inset-0 touch-none" style={{ zIndex: 0, cursor: "none" }} />
       <canvas ref={canvasRef} className="absolute inset-0 touch-none" style={{ zIndex: 1, cursor: "none" }} data-ink={inkColor} />
       <canvas ref={overlayRef} className="absolute inset-0 touch-none" style={{ zIndex: 2, cursor: "none" }} />
     </div>

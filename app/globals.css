@@ -7,7 +7,7 @@
   --fg-muted: #586e75;
   --fg-subtle: #93a1a1;
   --dot-color: #d3cbb7;
-  --dot-size: 1.5px;
+  --dot-size: 1.8px;
   --dot-spacing: 24px;
   --ink-color: #000000;
   --toolbar-bg: rgba(253, 246, 227, 0.85);
@@ -53,13 +53,6 @@ body {
 
 .dot-grid {
   background-color: var(--bg);
-  background-image: radial-gradient(
-    circle,
-    var(--dot-color) var(--dot-size),
-    transparent var(--dot-size)
-  );
-  background-size: var(--dot-spacing) var(--dot-spacing);
-  background-position: calc(var(--dot-spacing) / 2) calc(var(--dot-spacing) / 2);
 }
 
 /* ── Top bar ── */
