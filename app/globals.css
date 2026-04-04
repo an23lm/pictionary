@@ -9,6 +9,19 @@
   --dot-color: #d3cbb7;
   --dot-size: 1.5px;
   --dot-spacing: 24px;
+  --ink-color: #000000;
+  --toolbar-hover: var(--dot-color);
+}
+
+.dark {
+  --solarized-base3: #2a2017;
+  --solarized-base2: #3d3124;
+  --solarized-base00: #a89984;
+  --solarized-base01: #bdae93;
+  --solarized-base03: #ebdbb2;
+  --dot-color: #4a3c2e;
+  --ink-color: #d5c4a1;
+  --toolbar-hover: #4a3c2e;
 }
 
 html,
@@ -21,6 +34,7 @@ body {
 }
 
 .dot-grid {
+  background-color: var(--solarized-base3);
   background-image: radial-gradient(
     circle,
     var(--dot-color) var(--dot-size),

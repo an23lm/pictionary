@@ -4,7 +4,8 @@
       "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --turbopack)",
       "Bash(npm -v)",
       "Bash(export PATH=\"/opt/homebrew/bin:$PATH\")",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }
