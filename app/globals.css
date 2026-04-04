@@ -1,27 +1,45 @@
 @import "tailwindcss";
 
 :root {
-  --solarized-base3: #fdf6e3;
-  --solarized-base2: #eee8d5;
-  --solarized-base00: #657b83;
-  --solarized-base01: #586e75;
-  --solarized-base03: #002b36;
+  --bg: #fdf6e3;
+  --bg-secondary: #eee8d5;
+  --fg: #002b36;
+  --fg-muted: #586e75;
+  --fg-subtle: #93a1a1;
   --dot-color: #d3cbb7;
   --dot-size: 1.5px;
   --dot-spacing: 24px;
   --ink-color: #000000;
-  --toolbar-hover: var(--dot-color);
+  --toolbar-bg: rgba(253, 246, 227, 0.85);
+  --toolbar-border: rgba(0, 0, 0, 0.08);
+  --toolbar-hover: #eee8d5;
+  --toolbar-active: #d3cbb7;
+  --toolbar-shadow: 0 2px 16px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
 }
 
 .dark {
-  --solarized-base3: #2a2017;
-  --solarized-base2: #3d3124;
-  --solarized-base00: #a89984;
-  --solarized-base01: #bdae93;
-  --solarized-base03: #ebdbb2;
-  --dot-color: #4a3c2e;
+  --bg: #1a1410;
+  --bg-secondary: #2a2017;
+  --fg: #ebdbb2;
+  --fg-muted: #bdae93;
+  --fg-subtle: #7c6f64;
+  --dot-color: #332a20;
   --ink-color: #d5c4a1;
-  --toolbar-hover: #4a3c2e;
+  --toolbar-bg: rgba(26, 20, 16, 0.88);
+  --toolbar-border: rgba(255, 255, 255, 0.08);
+  --toolbar-hover: #2a2017;
+  --toolbar-active: #3d3124;
+  --toolbar-shadow: 0 2px 16px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.15);
+  --danger: #f87171;
+  --danger-bg: #450a0a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 html,
@@ -29,12 +47,12 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--solarized-base3);
-  color: var(--solarized-base03);
+  background: var(--bg);
+  color: var(--fg);
 }
 
 .dot-grid {
-  background-color: var(--solarized-base3);
+  background-color: var(--bg);
   background-image: radial-gradient(
     circle,
     var(--dot-color) var(--dot-size),
@@ -43,3 +61,83 @@ body {
   background-size: var(--dot-spacing) var(--dot-spacing);
   background-position: calc(var(--dot-spacing) / 2) calc(var(--dot-spacing) / 2);
 }
+
+/* ── Top bar ── */
+
+.top-bar {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  pointer-events: none;
+}
+
+.top-bar > * {
+  pointer-events: auto;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: none;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.badge:hover {
+  color: var(--fg);
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+/* ── Remote cursors ── */
+
+.remote-cursor {
+  position: absolute;
+  pointer-events: none;
+  z-index: 15;
+  transition: left 0.1s linear, top 0.1s linear;
+}
+
+.remote-cursor svg {
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.2));
+}
+
+.remote-cursor-label {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+}
+

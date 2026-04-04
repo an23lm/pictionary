@@ -9,7 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "nanoid": "^5.1.7",
     "next": "16.2.2",
     "pusher": "^5.3.3",
     "pusher-js": "^8.5.0",
