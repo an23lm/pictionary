@@ -8,8 +8,14 @@ interface Point {
   y: number;
 }
 
-type Segment = { x1: number; y1: number; x2: number; y2: number };
-type Dot = { x: number; y: number; dot: true };
+type Segment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  o?: number;
+};
+type Dot = { x: number; y: number; dot: true; o?: number };
 type DrawOp = Segment | Dot;
 
 interface DrawEvent {
@@ -19,9 +25,18 @@ interface DrawEvent {
 const LINE_WIDTH = 3;
 const DOT_RADIUS = 2;
 const BATCH_INTERVAL = 50;
+const MIN_OPACITY = 0.4;
 
 function isDot(op: DrawOp): op is Dot {
   return "dot" in op;
+}
+
+// Map pressure (0-1) to opacity (MIN_OPACITY-1) with exponential curve.
+// pressure=0 means no pressure data (mouse) → full opacity.
+function pressureToOpacity(pressure: number): number {
+  if (pressure === 0) return 1;
+  // Exponential: opacity = MIN_OPACITY + (1 - MIN_OPACITY) * pressure^2
+  return MIN_OPACITY + (1 - MIN_OPACITY) * pressure * pressure;
 }
 
 export default function DrawingBoard({ room }: { room: string }) {
@@ -29,6 +44,7 @@ export default function DrawingBoard({ room }: { room: string }) {
   const isDrawing = useRef(false);
   const hasMoved = useRef(false);
   const lastPoint = useRef<Point | null>(null);
+  const lastPressure = useRef<number>(0);
   const batch = useRef<DrawOp[]>([]);
   const batchTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const socketId = useRef<string>("");
@@ -38,7 +54,9 @@ export default function DrawingBoard({ room }: { room: string }) {
 
   // Initialize dark mode from system preference
   useEffect(() => {
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const prefersDark = window.matchMedia(
+      "(prefers-color-scheme: dark)"
+    ).matches;
     setDark(prefersDark);
 
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -66,13 +84,16 @@ export default function DrawingBoard({ room }: { room: string }) {
       if (!ctx) return;
 
       const color = getInkColor();
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
       ctx.lineWidth = LINE_WIDTH;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
 
       for (const op of ops) {
+        const opacity = op.o ?? 1;
+        ctx.globalAlpha = opacity;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+
         if (isDot(op)) {
           ctx.beginPath();
           ctx.arc(op.x, op.y, DOT_RADIUS, 0, Math.PI * 2);
@@ -80,7 +101,6 @@ export default function DrawingBoard({ room }: { room: string }) {
         } else {
           ctx.beginPath();
           ctx.moveTo(op.x1, op.y1);
-          // Quadratic curve for smoother lines — use midpoint as control point
           const cx = (op.x1 + op.x2) / 2;
           const cy = (op.y1 + op.y2) / 2;
           ctx.quadraticCurveTo(op.x1, op.y1, cx, cy);
@@ -88,6 +108,8 @@ export default function DrawingBoard({ room }: { room: string }) {
           ctx.stroke();
         }
       }
+
+      ctx.globalAlpha = 1;
     },
     [getInkColor]
   );
@@ -183,62 +205,85 @@ export default function DrawingBoard({ room }: { room: string }) {
     };
   }, [flushBatch]);
 
-  const getCanvasPoint = (e: React.MouseEvent | React.TouchEvent): Point => {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const clientX =
-      "touches" in e ? e.touches[0].clientX : (e as React.MouseEvent).clientX;
-    const clientY =
-      "touches" in e ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
-    return {
-      x: clientX - rect.left,
-      y: clientY - rect.top,
-    };
-  };
+  // Pointer event handlers (PointerEvent exposes pressure from trackpad/stylus)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-  const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
-    e.preventDefault();
-    isDrawing.current = true;
-    hasMoved.current = false;
-    lastPoint.current = getCanvasPoint(e);
-  };
-
-  const handlePointerMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!isDrawing.current || !lastPoint.current) return;
-    e.preventDefault();
-    hasMoved.current = true;
-
-    const point = getCanvasPoint(e);
-    const segment: Segment = {
-      x1: lastPoint.current.x,
-      y1: lastPoint.current.y,
-      x2: point.x,
-      y2: point.y,
+    const getPoint = (e: PointerEvent): Point => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     };
 
-    drawOps([segment]);
-    batch.current.push(segment);
-    lastPoint.current = point;
-  };
+    const onPointerDown = (e: PointerEvent) => {
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch {};
+      isDrawing.current = true;
+      hasMoved.current = false;
+      lastPoint.current = getPoint(e);
+      lastPressure.current = e.pressure;
+    };
 
-  const handlePointerUp = () => {
-    if (isDrawing.current) {
-      // Click without drag — draw a dot
-      if (!hasMoved.current && lastPoint.current) {
-        const dot: Dot = {
-          x: lastPoint.current.x,
-          y: lastPoint.current.y,
-          dot: true,
-        };
-        drawOps([dot]);
-        batch.current.push(dot);
+    const onPointerMove = (e: PointerEvent) => {
+      if (!isDrawing.current || !lastPoint.current) return;
+      e.preventDefault();
+      hasMoved.current = true;
+
+      const point = getPoint(e);
+      const opacity = pressureToOpacity(e.pressure);
+      // Round to 2 decimals to save bandwidth
+      const o = Math.round(opacity * 100) / 100;
+
+      const segment: Segment = {
+        x1: lastPoint.current.x,
+        y1: lastPoint.current.y,
+        x2: point.x,
+        y2: point.y,
+        ...(o < 1 ? { o } : {}),
+      };
+
+      drawOps([segment]);
+      batch.current.push(segment);
+      lastPoint.current = point;
+      lastPressure.current = e.pressure;
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (isDrawing.current) {
+        if (!hasMoved.current && lastPoint.current) {
+          const opacity = pressureToOpacity(lastPressure.current);
+          const o = Math.round(opacity * 100) / 100;
+          const dot: Dot = {
+            x: lastPoint.current.x,
+            y: lastPoint.current.y,
+            dot: true,
+            ...(o < 1 ? { o } : {}),
+          };
+          drawOps([dot]);
+          batch.current.push(dot);
+        }
+        flushBatch();
       }
-      flushBatch();
-    }
-    isDrawing.current = false;
-    hasMoved.current = false;
-    lastPoint.current = null;
-  };
+      isDrawing.current = false;
+      hasMoved.current = false;
+      lastPoint.current = null;
+      lastPressure.current = 0;
+    };
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [drawOps, flushBatch]);
 
   const handleClear = () => {
     clearCanvas();
@@ -304,7 +349,16 @@ export default function DrawingBoard({ room }: { room: string }) {
             aria-label="Toggle dark mode"
           >
             {dark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <circle cx="12" cy="12" r="5" />
                 <line x1="12" y1="1" x2="12" y2="3" />
                 <line x1="12" y1="21" x2="12" y2="23" />
@@ -316,7 +370,16 @@ export default function DrawingBoard({ room }: { room: string }) {
                 <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
               </svg>
             ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
               </svg>
             )}
@@ -334,14 +397,6 @@ export default function DrawingBoard({ room }: { room: string }) {
       <canvas
         ref={canvasRef}
         className="absolute inset-0 cursor-crosshair touch-none"
-        onMouseDown={handlePointerDown}
-        onMouseMove={handlePointerMove}
-        onMouseUp={handlePointerUp}
-        onMouseLeave={handlePointerUp}
-        onTouchStart={handlePointerDown}
-        onTouchMove={handlePointerMove}
-        onTouchEnd={handlePointerUp}
-        onTouchCancel={handlePointerUp}
       />
     </div>
   );
