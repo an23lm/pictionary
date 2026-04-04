@@ -135,6 +135,10 @@ export default function DrawingBoard({ room }: { room: string }) {
   const myColor = useRef("#2563eb");
   const myId = useRef(Math.random().toString(36).slice(2, 8));
 
+  // Safe zone: min dimensions across all clients, centered on this screen
+  const remoteDims = useRef<{ w: number; h: number } | null>(null);
+  const safeZone = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+
   const [copied, setCopied] = useState(false);
   const [connected, setConnected] = useState(false);
   const [dark, setDark] = useState(false);
@@ -169,19 +173,29 @@ export default function DrawingBoard({ room }: { room: string }) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const sz = safeZone.current;
+    const ox = sz ? sz.x : 0;
+    const oy = sz ? sz.y : 0;
     for (const op of ops) {
       ctx.globalAlpha = op.o ?? 1;
       if (isDot(op)) {
         ctx.fillStyle = op.c ?? "#000000";
         ctx.beginPath();
-        ctx.arc(op.x, op.y, (op.w ?? LINE_WIDTH) / 2, 0, Math.PI * 2);
+        ctx.arc(op.x + ox, op.y + oy, (op.w ?? LINE_WIDTH) / 2, 0, Math.PI * 2);
         ctx.fill();
       } else {
+        // Offset stroke points from safe-zone space → screen space
+        const pts = op.pts;
+        const screenPts = new Array(pts.length);
+        for (let i = 0; i < pts.length; i += 2) {
+          screenPts[i] = pts[i] + ox;
+          screenPts[i + 1] = pts[i + 1] + oy;
+        }
         ctx.strokeStyle = op.c ?? "#000000";
         ctx.lineWidth = op.w ?? LINE_WIDTH;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
-        drawSmoothPath(ctx, op.pts);
+        drawSmoothPath(ctx, screenPts);
       }
     }
     ctx.globalAlpha = 1;
@@ -293,8 +307,8 @@ export default function DrawingBoard({ room }: { room: string }) {
           event: "cursor",
           data: {
             id: myId.current,
-            x: Math.round(cursorPos.current.x),
-            y: Math.round(cursorPos.current.y),
+            x: Math.round(cursorPos.current.x - (safeZone.current?.x ?? 0)),
+            y: Math.round(cursorPos.current.y - (safeZone.current?.y ?? 0)),
             color: myColor.current,
           },
         });
@@ -323,10 +337,15 @@ export default function DrawingBoard({ room }: { room: string }) {
       const color = canvasRef.current?.dataset.ink || "#000000";
       const o = Math.round(pendingOpacity.current * 100) / 100;
       const w = Math.round(smoothedWidth.current * 10) / 10;
-      batch.current.push({
-        pts: [...pendingPoints.current],
-        c: color, w, ...(o < 1 ? { o } : {}),
-      });
+      const pts = [...pendingPoints.current];
+      const sz = safeZone.current;
+      if (sz) {
+        for (let i = 0; i < pts.length; i += 2) {
+          pts[i] -= sz.x;
+          pts[i + 1] -= sz.y;
+        }
+      }
+      batch.current.push({ pts, c: color, w, ...(o < 1 ? { o } : {}) });
       pendingPoints.current = [];
     }
     sendBatch();
@@ -334,6 +353,36 @@ export default function DrawingBoard({ room }: { room: string }) {
 
   const broadcastClear = useCallback(() => {
     immediateQueue.current.push({ event: "clear", data: {} });
+    sendBatch();
+  }, [sendBatch]);
+
+  /* ─── Safe zone calculation ─── */
+
+  const recalcSafeZone = useCallback(() => {
+    const localW = window.innerWidth;
+    const localH = window.innerHeight;
+    const remote = remoteDims.current;
+    if (!remote) {
+      safeZone.current = null;
+      return;
+    }
+    const safeW = Math.min(localW, remote.w);
+    const safeH = Math.min(localH, remote.h);
+    safeZone.current = {
+      x: (localW - safeW) / 2,
+      y: (localH - safeH) / 2,
+      w: safeW,
+      h: safeH,
+    };
+  }, []);
+
+
+  const broadcastDims = useCallback(() => {
+    if (!socketIdRef.current) return;
+    immediateQueue.current.push({
+      event: "dims",
+      data: { w: window.innerWidth, h: window.innerHeight },
+    });
     sendBatch();
   }, [sendBatch]);
 
@@ -354,11 +403,13 @@ export default function DrawingBoard({ room }: { room: string }) {
       dots.width = window.innerWidth;
       dots.height = window.innerHeight;
       if (img) ctx?.putImageData(img, 0, 0);
+      recalcSafeZone();
+      broadcastDims();
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, []);
+  }, [recalcSafeZone, broadcastDims]);
 
   /* ─── Animated dot grid ─── */
 
@@ -408,7 +459,8 @@ export default function DrawingBoard({ room }: { room: string }) {
       const color = getComputedStyle(document.documentElement)
         .getPropertyValue("--dot-color").trim() || "#d3cbb7";
 
-      ctx.fillStyle = color;
+      // Safe zone for fading out-of-bounds dots
+      const sz = safeZone.current;
 
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
@@ -431,7 +483,6 @@ export default function DrawingBoard({ room }: { room: string }) {
             const force = proximity * strength;
             const nx = dx / dist;
             const ny = dy / dist;
-            // Repel (positive) when idle, attract (negative) when drawing
             const dir = drawing ? -1 : 1;
             dotOffsets[idx] += (nx * force * dir - dotOffsets[idx]) * 0.15;
             dotOffsets[idx + 1] += (ny * force * dir - dotOffsets[idx + 1]) * 0.15;
@@ -443,14 +494,32 @@ export default function DrawingBoard({ room }: { room: string }) {
           const drawX = restX + dotOffsets[idx];
           const drawY = restY + dotOffsets[idx + 1];
 
-          // Scale up dots near cursor: gradient from 1× to DOT_SCALE_MAX×
-          const scale = 1 + (DOT_SCALE_MAX - 1) * proximity * proximity;
+          // Inside/outside safe zone — dots outside are smaller and fainter
+          let sizeMultiplier = 1;
+          if (sz) {
+            const insideX = restX >= sz.x && restX <= sz.x + sz.w;
+            const insideY = restY >= sz.y && restY <= sz.y + sz.h;
+            if (!insideX || !insideY) {
+              sizeMultiplier = 0.85;
+              ctx.globalAlpha = 0.4;
+            } else {
+              ctx.globalAlpha = 1;
+            }
+          } else {
+            ctx.globalAlpha = 1;
+          }
+
+          ctx.fillStyle = color;
+
+          // Scale up dots near cursor + apply safe zone size
+          const scale = (1 + (DOT_SCALE_MAX - 1) * proximity * proximity) * sizeMultiplier;
           ctx.beginPath();
           ctx.arc(drawX, drawY, DOT_RADIUS * scale, 0, Math.PI * 2);
           ctx.fill();
         }
       }
 
+      ctx.globalAlpha = 1;
       animId = requestAnimationFrame(animate);
     };
 
@@ -469,6 +538,8 @@ export default function DrawingBoard({ room }: { room: string }) {
     pusher.connection.bind("connected", () => {
       socketIdRef.current = pusher.connection.socket_id;
       setConnected(true);
+      // Broadcast our dimensions to the room
+      broadcastDims();
     });
     pusher.connection.bind("disconnected", () => setConnected(false));
     const channel = pusher.subscribe(`room-${room}`);
@@ -477,14 +548,26 @@ export default function DrawingBoard({ room }: { room: string }) {
     channel.bind("cursor", (data: CursorEvent) => {
       setRemoteCursors((prev) => {
         const now = Date.now();
+        const sz = safeZone.current;
+        const ox = sz ? sz.x : 0;
+        const oy = sz ? sz.y : 0;
         return [
           ...prev.filter((c) => c.id !== data.id && now - c.lastSeen < CURSOR_EXPIRE_MS),
-          { ...data, lastSeen: now },
+          { ...data, x: data.x + ox, y: data.y + oy, lastSeen: now },
         ];
       });
     });
+    channel.bind("dims", (data: { w: number; h: number }) => {
+      const changed = !remoteDims.current ||
+        remoteDims.current.w !== data.w || remoteDims.current.h !== data.h;
+      remoteDims.current = data;
+      recalcSafeZone();
+      // Reply with our dims so the other client also gets the safe zone
+      // Only reply if their dims actually changed (prevents ping-pong)
+      if (changed) broadcastDims();
+    });
     return () => { pusher.unsubscribe(`room-${room}`); pusher.disconnect(); };
-  }, [room, renderOps, clearCanvas]);
+  }, [room, renderOps, clearCanvas, broadcastDims, recalcSafeZone]);
 
   /* ─── Send loop ─── */
 
@@ -494,10 +577,15 @@ export default function DrawingBoard({ room }: { room: string }) {
         const color = canvasRef.current?.dataset.ink || "#000000";
         const o = Math.round(pendingOpacity.current * 100) / 100;
         const w = Math.round(smoothedWidth.current * 10) / 10;
-        batch.current.push({
-          pts: [...pendingPoints.current],
-          c: color, w, ...(o < 1 ? { o } : {}),
-        });
+        const pts = [...pendingPoints.current];
+        const sz = safeZone.current;
+        if (sz) {
+          for (let i = 0; i < pts.length; i += 2) {
+            pts[i] -= sz.x;
+            pts[i + 1] -= sz.y;
+          }
+        }
+        batch.current.push({ pts, c: color, w, ...(o < 1 ? { o } : {}) });
         pendingPoints.current = pendingPoints.current.slice(-2);
       }
       sendBatch();
@@ -623,7 +711,10 @@ export default function DrawingBoard({ room }: { room: string }) {
           ctx.fill();
           ctx.globalAlpha = 1;
         }
-        batch.current.push({ x, y, dot: true, c: color, w: LINE_WIDTH, ...(o < 1 ? { o } : {}) } as Dot);
+        const sz = safeZone.current;
+        const sx = sz ? x - sz.x : x;
+        const sy = sz ? y - sz.y : y;
+        batch.current.push({ x: sx, y: sy, dot: true, c: color, w: LINE_WIDTH, ...(o < 1 ? { o } : {}) } as Dot);
         overlay.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height);
       } else {
         commitOverlay(activeOpacity.current);

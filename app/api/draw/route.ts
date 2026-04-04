@@ -49,19 +49,22 @@ export async function POST(request: Request) {
     return Response.json({ ok: true });
   }
 
-  // Batched: use Pusher's triggerBatch to send all events in one HTTP call
+  // Batched: use Pusher's triggerBatch, chunked to max 10 per call
   const items = body.batch;
   if (items.length === 1) {
     await pusher.trigger(channel, items[0].event, items[0].data, excludeOpts);
   } else if (items.length > 1) {
-    await pusher.triggerBatch(
-      items.map((item) => ({
-        channel,
-        name: item.event,
-        data: item.data,
-        ...(excludeOpts ? { socket_id: excludeOpts.socket_id } : {}),
-      }))
-    );
+    const mapped = items.map((item) => ({
+      channel,
+      name: item.event,
+      data: item.data,
+      ...(excludeOpts ? { socket_id: excludeOpts.socket_id } : {}),
+    }));
+    // Pusher limits triggerBatch to 10 events
+    for (let i = 0; i < mapped.length; i += 10) {
+      const chunk = mapped.slice(i, i + 10);
+      await pusher.triggerBatch(chunk);
+    }
   }
 
   return Response.json({ ok: true });
