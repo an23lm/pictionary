@@ -15,6 +15,7 @@ type Stroke = {
   c?: string;
   w?: number;
   o?: number;
+  sid?: string; // stroke ID for continuity across batches
 };
 
 type Dot = {
@@ -54,10 +55,10 @@ const LINE_WIDTH_MIN = 1.2;   // thinnest (fast movement)
 const LINE_WIDTH_MAX = 4.5;   // thickest (slow/still)
 const WIDTH_LERP = 0.15;      // smoothing factor (0–1, lower = smoother transitions)
 const CURSOR_SIZE = LINE_WIDTH * 2;
-const SEND_INTERVAL = 100;
+const SEND_INTERVAL = 33; // ~30fps
 const MIN_OPACITY = 0.3;
 const CURSOR_EXPIRE_MS = 5000;
-const CURSOR_MOVE_THRESHOLD = 3;
+const CURSOR_MOVE_THRESHOLD = 1;
 
 // Dot grid animation
 const DOT_SPACING = 28;
@@ -113,6 +114,7 @@ export default function DrawingBoard({ room }: { room: string }) {
   const dotsRef = useRef<HTMLCanvasElement>(null);
   const isDrawing = useRef(false);
   const hasMoved = useRef(false);
+  const strokeId = useRef("");
   const activePoints = useRef<number[]>([]);
   const activeWidths = useRef<number[]>([]); // per-point width for variable thickness
   const activeOpacity = useRef(1);
@@ -143,6 +145,8 @@ export default function DrawingBoard({ room }: { room: string }) {
   const [connected, setConnected] = useState(false);
   const [dark, setDark] = useState(false);
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
+  const [remoteDrawing, setRemoteDrawing] = useState(false);
+  const remoteDrawTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [localCursor, setLocalCursor] = useState<Point | null>(null);
   const [cursorVisible, setCursorVisible] = useState(false);
   const [isDrawingState, setIsDrawingState] = useState(false);
@@ -154,6 +158,8 @@ export default function DrawingBoard({ room }: { room: string }) {
   const inkColor = dark ? "#d5c4a1" : "#000000";
   const cursorColor = dark ? "#fdf6e3" : "#002b36";
   const dotColor = dark ? "#332a20" : "#d3cbb7";
+  const dotColorRef = useRef(dotColor);
+  dotColorRef.current = dotColor;
 
   /* ─── Dark mode ─── */
 
@@ -170,7 +176,10 @@ export default function DrawingBoard({ room }: { room: string }) {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
-  /* ─── Render remote ops ─── */
+  /* ─── Render remote ops (with stroke continuity) ─── */
+
+  // Track accumulated points per stroke ID for smooth bezier joins across batches
+  const remoteStrokes = useRef<Map<string, number[]>>(new Map());
 
   const renderOps = useCallback((ops: DrawOp[]) => {
     const canvas = canvasRef.current;
@@ -180,26 +189,57 @@ export default function DrawingBoard({ room }: { room: string }) {
     const sz = safeZone.current;
     const ox = sz ? sz.x : 0;
     const oy = sz ? sz.y : 0;
+
     for (const op of ops) {
-      ctx.globalAlpha = op.o ?? 1;
+      const o = op.o ?? 1;
+      ctx.globalAlpha = o;
+
       if (isDot(op)) {
         ctx.fillStyle = op.c ?? "#000000";
         ctx.beginPath();
         ctx.arc(op.x + ox, op.y + oy, (op.w ?? LINE_WIDTH) / 2, 0, Math.PI * 2);
         ctx.fill();
       } else {
-        // Offset stroke points from safe-zone space → screen space
+        // Offset to screen space
         const pts = op.pts;
         const screenPts = new Array(pts.length);
         for (let i = 0; i < pts.length; i += 2) {
           screenPts[i] = pts[i] + ox;
           screenPts[i + 1] = pts[i + 1] + oy;
         }
+
         ctx.strokeStyle = op.c ?? "#000000";
         ctx.lineWidth = op.w ?? LINE_WIDTH;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
-        drawSmoothPath(ctx, screenPts);
+
+        const sid = op.sid;
+        if (sid) {
+          const buf = remoteStrokes.current.get(sid);
+          if (buf && buf.length >= 2) {
+            // Continuing stroke: prepend last 2 points from buffer for bezier continuity
+            const joinPts = [buf[buf.length - 2], buf[buf.length - 1], ...screenPts];
+            // Skip duplicate overlap point
+            const startIdx = (screenPts[0] === buf[buf.length - 2] && screenPts[1] === buf[buf.length - 1]) ? 2 : 0;
+            for (let i = startIdx; i < screenPts.length; i++) {
+              buf.push(screenPts[i]);
+            }
+            // Draw only the new segment with context from the previous point
+            drawSmoothPath(ctx, joinPts);
+          } else {
+            // First batch
+            remoteStrokes.current.set(sid, [...screenPts]);
+            drawSmoothPath(ctx, screenPts);
+          }
+
+          // Clean up old strokes
+          if (remoteStrokes.current.size > 30) {
+            const first = remoteStrokes.current.keys().next().value;
+            if (first) remoteStrokes.current.delete(first);
+          }
+        } else {
+          drawSmoothPath(ctx, screenPts);
+        }
       }
     }
     ctx.globalAlpha = 1;
@@ -292,10 +332,8 @@ export default function DrawingBoard({ room }: { room: string }) {
 
   const lastSentCursor = useRef<Point>({ x: -1, y: -1 });
   const immediateQueue = useRef<{ event: string; data: unknown }[]>([]);
-  const sending = useRef(false);
 
   const sendBatch = useCallback(() => {
-    if (sending.current) return;
     const events: { event: string; data: unknown }[] = [];
 
     if (batch.current.length > 0) {
@@ -326,34 +364,37 @@ export default function DrawingBoard({ room }: { room: string }) {
     }
 
     if (events.length === 0) return;
-    sending.current = true;
+
+    // Fire and forget — no inflight guard, requests can overlap
     fetch("/api/draw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room, batch: events, socketId: socketIdRef.current }),
-    })
-      .catch(() => {})
-      .finally(() => { sending.current = false; });
+    }).catch(() => {});
   }, [room]);
 
-  const flushPending = useCallback(() => {
-    if (pendingPoints.current.length >= 4) {
-      const color = canvasRef.current?.dataset.ink || "#000000";
-      const o = Math.round(pendingOpacity.current * 100) / 100;
-      const w = Math.round(smoothedWidth.current * 10) / 10;
-      const pts = [...pendingPoints.current];
-      const sz = safeZone.current;
-      if (sz) {
-        for (let i = 0; i < pts.length; i += 2) {
-          pts[i] -= sz.x;
-          pts[i + 1] -= sz.y;
-        }
+  // Drain pending points into batch as a stroke op, with safe-zone offset
+  const drainPending = useCallback((keepLast: boolean) => {
+    if (pendingPoints.current.length < 4) return;
+    const color = canvasRef.current?.dataset.ink || "#000000";
+    const o = Math.round(pendingOpacity.current * 100) / 100;
+    const w = Math.round(smoothedWidth.current * 10) / 10;
+    const pts = [...pendingPoints.current];
+    const sz = safeZone.current;
+    if (sz) {
+      for (let i = 0; i < pts.length; i += 2) {
+        pts[i] -= sz.x;
+        pts[i + 1] -= sz.y;
       }
-      batch.current.push({ pts, c: color, w, ...(o < 1 ? { o } : {}) });
-      pendingPoints.current = [];
     }
+    batch.current.push({ pts, c: color, w, sid: strokeId.current, ...(o < 1 ? { o } : {}) });
+    pendingPoints.current = keepLast ? pendingPoints.current.slice(-2) : [];
+  }, []);
+
+  const flushPending = useCallback(() => {
+    drainPending(false);
     sendBatch();
-  }, [sendBatch]);
+  }, [sendBatch, drainPending]);
 
   const broadcastClear = useCallback(() => {
     immediateQueue.current.push({ event: "clear", data: {} });
@@ -458,13 +499,18 @@ export default function DrawingBoard({ room }: { room: string }) {
       const cy = cursorPos.current.y;
       const r2 = DOT_REPEL_RADIUS * DOT_REPEL_RADIUS;
       const halfSpacing = DOT_SPACING / 2;
-
-      // Read dot color from CSS variable
-      const color = getComputedStyle(document.documentElement)
-        .getPropertyValue("--dot-color").trim() || "#d3cbb7";
-
-      // Safe zone for fading out-of-bounds dots
+      const color = dotColorRef.current;
       const sz = safeZone.current;
+      const drawing = isDrawing.current;
+
+      // Pre-compute safe zone bounds
+      const szX1 = sz ? sz.x : 0;
+      const szY1 = sz ? sz.y : 0;
+      const szX2 = sz ? sz.x + sz.w : w;
+      const szY2 = sz ? sz.y + sz.h : h;
+      const hasSz = !!sz;
+
+      ctx.fillStyle = color;
 
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
@@ -472,19 +518,16 @@ export default function DrawingBoard({ room }: { room: string }) {
           const restX = col * DOT_SPACING + halfSpacing;
           const restY = row * DOT_SPACING + halfSpacing;
 
-          // Compute repulsion from cursor
           const dx = restX - cx;
           const dy = restY - cy;
           const dist2 = dx * dx + dy * dy;
 
-          let proximity = 0; // 0 = far, 1 = at cursor center
-          const drawing = isDrawing.current;
+          let proximity = 0;
 
           if (dist2 < r2 && dist2 > 0.1) {
             const dist = Math.sqrt(dist2);
             proximity = 1 - dist / DOT_REPEL_RADIUS;
-            const strength = drawing ? DOT_ATTRACT_STRENGTH : DOT_REPEL_STRENGTH;
-            const force = proximity * strength;
+            const force = proximity * (drawing ? DOT_ATTRACT_STRENGTH : DOT_REPEL_STRENGTH);
             const nx = dx / dist;
             const ny = dy / dist;
             const dir = drawing ? -1 : 1;
@@ -495,30 +538,18 @@ export default function DrawingBoard({ room }: { room: string }) {
             dotOffsets[idx + 1] *= (1 - DOT_RETURN_SPEED);
           }
 
-          const drawX = restX + dotOffsets[idx];
-          const drawY = restY + dotOffsets[idx + 1];
-
-          // Inside/outside safe zone — dots outside are smaller and fainter
+          // Safe zone: outside dots are smaller and fainter
           let sizeMultiplier = 1;
-          if (sz) {
-            const insideX = restX >= sz.x && restX <= sz.x + sz.w;
-            const insideY = restY >= sz.y && restY <= sz.y + sz.h;
-            if (!insideX || !insideY) {
-              sizeMultiplier = 0.85;
-              ctx.globalAlpha = 0.4;
-            } else {
-              ctx.globalAlpha = 1;
-            }
+          if (hasSz && (restX < szX1 || restX > szX2 || restY < szY1 || restY > szY2)) {
+            sizeMultiplier = 0.85;
+            ctx.globalAlpha = 0.4;
           } else {
             ctx.globalAlpha = 1;
           }
 
-          ctx.fillStyle = color;
-
-          // Scale up dots near cursor + apply safe zone size
           const scale = (1 + (DOT_SCALE_MAX - 1) * proximity * proximity) * sizeMultiplier;
           ctx.beginPath();
-          ctx.arc(drawX, drawY, DOT_RADIUS * scale, 0, Math.PI * 2);
+          ctx.arc(restX + dotOffsets[idx], restY + dotOffsets[idx + 1], DOT_RADIUS * scale, 0, Math.PI * 2);
           ctx.fill();
         }
       }
@@ -547,7 +578,12 @@ export default function DrawingBoard({ room }: { room: string }) {
     });
     pusher.connection.bind("disconnected", () => setConnected(false));
     const channel = pusher.subscribe(`room-${room}`);
-    channel.bind("draw", (data: DrawEvent) => renderOps(data.ops));
+    channel.bind("draw", (data: DrawEvent) => {
+      renderOps(data.ops);
+      setRemoteDrawing(true);
+      if (remoteDrawTimer.current) clearTimeout(remoteDrawTimer.current);
+      remoteDrawTimer.current = setTimeout(() => setRemoteDrawing(false), 200);
+    });
     channel.bind("clear", () => clearCanvas());
     channel.bind("cursor", (data: CursorEvent) => {
       setRemoteCursors((prev) => {
@@ -577,25 +613,11 @@ export default function DrawingBoard({ room }: { room: string }) {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      if (pendingPoints.current.length >= 4) {
-        const color = canvasRef.current?.dataset.ink || "#000000";
-        const o = Math.round(pendingOpacity.current * 100) / 100;
-        const w = Math.round(smoothedWidth.current * 10) / 10;
-        const pts = [...pendingPoints.current];
-        const sz = safeZone.current;
-        if (sz) {
-          for (let i = 0; i < pts.length; i += 2) {
-            pts[i] -= sz.x;
-            pts[i + 1] -= sz.y;
-          }
-        }
-        batch.current.push({ pts, c: color, w, ...(o < 1 ? { o } : {}) });
-        pendingPoints.current = pendingPoints.current.slice(-2);
-      }
+      drainPending(true); // keep last 2 points for smooth joins between batches
       sendBatch();
     }, SEND_INTERVAL);
     return () => { clearInterval(timer); sendBatch(); };
-  }, [sendBatch]);
+  }, [sendBatch, drainPending]);
 
   /* ─── Expire cursors ─── */
 
@@ -736,6 +758,7 @@ export default function DrawingBoard({ room }: { room: string }) {
       isDrawing.current = true;
       setIsDrawingState(true);
       hasMoved.current = false;
+      strokeId.current = Math.random().toString(36).slice(2, 8);
       smoothedWidth.current = LINE_WIDTH;
       lastMoveTime.current = performance.now();
 
@@ -909,17 +932,25 @@ export default function DrawingBoard({ room }: { room: string }) {
         </div>
       </div>
 
-      {/* Remote cursors */}
-      {remoteCursors.map((c) => (
-        <div key={c.id} className="remote-cursor" style={{ left: c.x, top: c.y }}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill={cursorColor} stroke={dark ? "#1a1410" : "#fdf6e3"} strokeWidth="1">
-            <path d="M2 2l6 16 2.5-6.5L17 9z" />
-          </svg>
-          <span className="remote-cursor-label" style={{ background: cursorColor, color: dark ? "#1a1410" : "#fdf6e3" }}>
-            Player
-          </span>
-        </div>
-      ))}
+      {/* Remote cursors — hidden while remote is drawing */}
+      {!remoteDrawing && remoteCursors.map((c) => {
+        const remoteColor = dark ? "#a89984" : "#586e75";
+        return (
+          <div
+            key={c.id}
+            className="remote-cursor"
+            style={{
+              left: c.x - CURSOR_SIZE / 2,
+              top: c.y - CURSOR_SIZE / 2,
+              width: CURSOR_SIZE,
+              height: CURSOR_SIZE,
+              borderRadius: "50%",
+              backgroundColor: remoteColor,
+              opacity: 0.7,
+            }}
+          />
+        );
+      })}
 
       {/* Virtual cursor — fades out when hovering buttons */}
       {localCursor && (
@@ -932,7 +963,7 @@ export default function DrawingBoard({ room }: { room: string }) {
             height: isDrawingState ? CURSOR_SIZE_DRAWING : CURSOR_SIZE,
             borderRadius: "50%",
             backgroundColor: cursorColor,
-            opacity: cursorOnButton ? 0 : 1,
+            opacity: (cursorOnButton || isDrawingState) ? 0 : 1,
             zIndex: 9999,
             transition: "width 0.15s ease, height 0.15s ease, opacity 0.12s ease",
           }}

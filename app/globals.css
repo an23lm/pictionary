@@ -7,16 +7,9 @@
   --fg-muted: #586e75;
   --fg-subtle: #93a1a1;
   --dot-color: #d3cbb7;
-  --dot-size: 1.8px;
-  --dot-spacing: 24px;
   --ink-color: #000000;
   --toolbar-bg: rgba(253, 246, 227, 0.85);
   --toolbar-border: rgba(0, 0, 0, 0.08);
-  --toolbar-hover: #eee8d5;
-  --toolbar-active: #d3cbb7;
-  --toolbar-shadow: 0 2px 16px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
-  --danger: #dc2626;
-  --danger-bg: #fef2f2;
 }
 
 .dark {
@@ -29,16 +22,10 @@
   --ink-color: #d5c4a1;
   --toolbar-bg: rgba(26, 20, 16, 0.88);
   --toolbar-border: rgba(255, 255, 255, 0.08);
-  --toolbar-hover: #2a2017;
-  --toolbar-active: #3d3124;
-  --toolbar-shadow: 0 2px 16px rgba(0, 0, 0, 0.3), 0 1px 4px rgba(0, 0, 0, 0.15);
-  --danger: #f87171;
-  --danger-bg: #450a0a;
 }
 
-*,
-*::before,
-*::after {
+* {
+  cursor: none !important;
   box-sizing: border-box;
 }
 
@@ -49,11 +36,6 @@ body {
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
-  cursor: none;
-}
-
-* {
-  cursor: none !important;
 }
 
 .dot-grid {
@@ -77,12 +59,10 @@ body {
 
 .top-bar > * {
   pointer-events: auto;
-  cursor: none;
 }
 
 .top-bar button,
 .top-bar a {
-  cursor: none;
   position: relative;
   overflow: hidden;
 }
@@ -96,7 +76,6 @@ body {
 .logo-wrap {
   position: relative;
   display: inline-block;
-  cursor: none;
 }
 
 .logo {
@@ -138,13 +117,11 @@ body {
   outline: none;
   box-shadow: none;
   color: var(--fg-muted);
-  cursor: pointer;
   transition: color 0.15s ease;
 }
 
 .badge:hover {
   color: var(--fg);
-  background: none;
 }
 
 .badge-label {
@@ -178,22 +155,4 @@ body {
   position: absolute;
   pointer-events: none;
   z-index: 15;
-  transition: left 0.1s linear, top 0.1s linear;
 }
-
-.remote-cursor svg {
-  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.2));
-}
-
-.remote-cursor-label {
-  position: absolute;
-  left: 16px;
-  top: 16px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 10px;
-  font-weight: 600;
-  color: white;
-  white-space: nowrap;
-}
-

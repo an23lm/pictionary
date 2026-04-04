@@ -8,8 +8,11 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Pictionary Board",
+  title: "Pictionary — Draw Together",
   description: "A collaborative drawing board for playing Pictionary with friends",
+  icons: {
+    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M22 4a4 4 0 0 1 5.6 5.6L12 25l-8 2.4 2.4-8Z' fill='%23586e75'/></svg>",
+  },
 };
 
 export default function RootLayout({
