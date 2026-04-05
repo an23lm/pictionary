@@ -148,6 +148,87 @@ body {
     margin-left: 5px;
 }
 
+/* ── Word prompt ── */
+
+.word-prompt {
+  position: absolute;
+  z-index: 30;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  padding: 8px 24px;
+  border-radius: 12px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  background: var(--bg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.word-prompt.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ── Game UI ── */
+
+.game-score {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--fg);
+  min-width: 16px;
+  text-align: center;
+}
+
+.timer-badge {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+.diff-inline {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.diff-num {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+}
+
+.diff-num:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--toolbar-hover);
+}
+
+.diff-num.active {
+  color: var(--fg);
+  background: var(--toolbar-hover);
+}
+
+.diff-num.locked {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.diff-num.locked:hover {
+  background: none;
+  color: var(--fg-subtle);
+}
+
 .live-dot {
     width: 6px;
     height: 6px;

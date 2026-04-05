@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useCallback, useState } from "react";
 import Pusher from "pusher-js";
+import { WORDS } from "@/lib/words";
 
 /* ─── Types ─── */
 
@@ -137,6 +138,22 @@ export default function DrawingBoard({ room }: { room: string }) {
   // Button hover state
   const hoveredButton = useRef<HTMLElement | null>(null);
   const [cursorOnButton, setCursorOnButton] = useState(false);
+
+  // Word generator (local only — never sent to other clients)
+  const [word, setWord] = useState<string | null>(null);
+  const [wordVisible, setWordVisible] = useState(false);
+  const [difficulty, setDifficulty] = useState<"easy" | "medium" | "hard">("easy");
+  const [score, setScore] = useState({ easy: 0, medium: 0, hard: 0 });
+  const [timer, setTimer] = useState(0); // counts UP in seconds
+  const [timerRunning, setTimerRunning] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const usedWords = useRef<Set<string>>(new Set());
+  // Three word choices — one per difficulty, randomized on each round end
+  const [wordChoices, setWordChoices] = useState<{ easy: string; medium: string; hard: string }>({ easy: "", medium: "", hard: "" });
+
+  // Unlock: 2 requires 10 easy correct, 3 requires 10 medium correct
+  const mediumUnlocked = score.easy >= 10;
+  const hardUnlocked = score.medium >= 10;
 
   const inkColor = dark ? "#d5c4a1" : "#000000";
   const cursorColor = dark ? "#fdf6e3" : "#002b36";
@@ -983,6 +1000,56 @@ export default function DrawingBoard({ room }: { room: string }) {
     };
   }, [flushPending, redrawOverlay, commitOverlay, saveToStorage]);
 
+  /* ─── Word generator + timer ─── */
+
+  const pickRandomWord = (diff: "easy" | "medium" | "hard") => {
+    const pool = WORDS[diff].filter((w) => !usedWords.current.has(w));
+    if (pool.length === 0) { usedWords.current.clear(); pool.push(...WORDS[diff]); }
+    return pool[Math.floor(Math.random() * pool.length)];
+  };
+
+  const refreshChoices = useCallback(() => {
+    setWordChoices({
+      easy: pickRandomWord("easy"),
+      medium: pickRandomWord("medium"),
+      hard: pickRandomWord("hard"),
+    });
+  }, []);
+
+  // Pick initial choices on mount
+  useEffect(() => { refreshChoices(); }, [refreshChoices]);
+
+  const startRound = useCallback((diff: "easy" | "medium" | "hard", chosenWord: string) => {
+    usedWords.current.add(chosenWord);
+    setWord(chosenWord);
+    setWordVisible(true);
+    setDifficulty(diff);
+
+    setTimer(0);
+    setTimerRunning(true);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setTimer((t) => t + 1);
+    }, 1000);
+
+    setTimeout(() => setWordVisible(false), 5000);
+  }, []);
+
+  const endRound = useCallback((scored: boolean) => {
+    if (scored) {
+      setScore((s) => ({ ...s, [difficulty]: s[difficulty] + 1 }));
+    }
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+    setTimerRunning(false);
+    setWord(null);
+    refreshChoices();
+  }, [difficulty, refreshChoices]);
+
+  useEffect(() => {
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, []);
+
   /* ─── Handlers ─── */
 
   const handleClear = () => {
@@ -1021,6 +1088,51 @@ export default function DrawingBoard({ room }: { room: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Word choices: 1=easy, 2=medium, 3=hard — shown when not in a round */}
+          {!timerRunning && (
+            <div className="diff-inline">
+              <button className="diff-num" onClick={() => startRound("easy", wordChoices.easy)}>
+                {wordChoices.easy || "..."}
+              </button>
+              <button
+                className={`diff-num ${!mediumUnlocked ? "locked" : ""}`}
+                onClick={() => { if (mediumUnlocked) startRound("medium", wordChoices.medium); }}
+                disabled={!mediumUnlocked}
+              >
+                {mediumUnlocked ? wordChoices.medium || "..." : `${score.easy}/10`}
+              </button>
+              <button
+                className={`diff-num ${!hardUnlocked ? "locked" : ""}`}
+                onClick={() => { if (hardUnlocked) startRound("hard", wordChoices.hard); }}
+                disabled={!hardUnlocked}
+              >
+                {hardUnlocked ? wordChoices.hard || "..." : `${score.medium}/10`}
+              </button>
+            </div>
+          )}
+
+          {/* Timer + correct when in a round */}
+          {timerRunning && (
+            <>
+              <span className="timer-badge">
+                {Math.floor(timer / 60)}:{(timer % 60).toString().padStart(2, "0")}
+              </span>
+              <button onClick={() => endRound(true)} className="badge" aria-label="Correct" style={{ color: "#22c55e" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </button>
+              <button onClick={() => endRound(false)} className="badge" aria-label="Skip" style={{ color: "var(--fg-subtle)" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </>
+          )}
+
+          {/* Score */}
+          <span className="game-score">{score.easy + score.medium + score.hard}</span>
+
           <button onClick={() => setDark((d) => !d)} className="badge" aria-label="Toggle dark mode">
             {dark ? (
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1044,6 +1156,13 @@ export default function DrawingBoard({ room }: { room: string }) {
           </button>
         </div>
       </div>
+
+      {/* Word prompt — local only, never sent to other clients */}
+      {word && (
+        <div className={`word-prompt ${wordVisible ? "visible" : ""}`}>
+          {word}
+        </div>
+      )}
 
       {/* Remote cursors — hidden while remote is drawing */}
       {!remoteDrawing && remoteCursors.map((c) => {
